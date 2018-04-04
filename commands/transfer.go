@@ -38,10 +38,10 @@ var transferCmd = &cobra.Command{
 }
 
 func init() {
-	transferCmd.Flags().StringVarP(&FromHost, "from-host", "fh", FromHost, "cassandra1:9042")
-	transferCmd.Flags().StringVarP(&FromKeyspace, "from-keyspace", "fk", FromKeyspace, "old_keyspace_name")
-	transferCmd.Flags().StringVarP(&ToHost, "to-host", "th", ToHost, "cassandra2:9042")
-	transferCmd.Flags().StringVarP(&ToKeyspace, "to-keyspace", "tk", ToKeyspace, "new_keyspace_name")
+	transferCmd.Flags().StringVarP(&FromHost, "from-host", "h", FromHost, "cassandra1:9042")
+	transferCmd.Flags().StringVarP(&FromKeyspace, "from-keyspace", "k", FromKeyspace, "old_keyspace_name")
+	transferCmd.Flags().StringVarP(&ToHost, "to-host", "l", ToHost, "cassandra2:9042")
+	transferCmd.Flags().StringVarP(&ToKeyspace, "to-keyspace", "m", ToKeyspace, "new_keyspace_name")
 
 	rootCmd.AddCommand(transferCmd)
 }
