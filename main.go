@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/MySocialApp/cassandra-migrator/cmd"
+	"github.com/MySocialApp/cassandra-migrator/commands"
 )
 
 func main() {
-	cmd.Execute()
+	commands.Execute()
 }
