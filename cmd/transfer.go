@@ -73,7 +73,8 @@ func getCassandraSession(host string) *gocql.Session {
 }
 
 func getCreateTableQuery(table *gocql.TableMetadata) string {
-
+	// TODO
+	return ""
 }
 
 func getTableColumnsName(results map[string]interface{}) []string {
