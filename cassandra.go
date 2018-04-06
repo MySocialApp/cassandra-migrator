@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"log"
 	"time"
-	"go/types"
+	"sync"
 )
 
 type Cassandra struct {
@@ -89,8 +89,6 @@ func (c *Cassandra) getTableColumnsName(results map[string]interface{}) []string
 
 func (c *Cassandra) getStringOrNumber(v interface{}) string {
 	switch v.(type) {
-	case types.Nil:
-		return ""
 	case string:
 		return fmt.Sprintf("'%v'", strings.Replace(v.(string), "'", "''", -1))
 	case time.Time:
@@ -101,21 +99,64 @@ func (c *Cassandra) getStringOrNumber(v interface{}) string {
 }
 
 func (c *Cassandra) getValueString(v interface{}, columnMetadata *gocql.ColumnMetadata) string {
-	switch v.(type) {
-	case []interface{}:
+	if columnMetadata.Validator == "text" {
+		return c.getStringOrNumber(v)
+	}
+
+	switch columnMetadata.Validator {
+	case "list<int>":
 		var result []string
-		for _, e := range v.([]interface{}) {
+		for _, e := range v.([]int) {
 			result = append(result, c.getStringOrNumber(e))
 		}
 
-		if strings.Contains(columnMetadata.Validator, "set") {
-			return "{" + strings.Join(result, ",") + "}"
+		return "[" + strings.Join(result, ",") + "]"
+	case "list<bigint>":
+		var result []string
+		for _, e := range v.([]int64) {
+			result = append(result, c.getStringOrNumber(e))
 		}
 
 		return "[" + strings.Join(result, ",") + "]"
-	case map[interface{}][]interface{}:
+	case "list<text>":
+
 		var result []string
-		for k, v := range v.(map[interface{}]interface{}) {
+		for _, e := range v.([]string) {
+			result = append(result, c.getStringOrNumber(e))
+		}
+
+		return "[" + strings.Join(result, ",") + "]"
+	case "set<int>":
+		var result []string
+		for _, e := range v.([]int) {
+			result = append(result, c.getStringOrNumber(e))
+		}
+
+		return "{" + strings.Join(result, ",") + "}"
+	case "set<bigint>":
+		var result []string
+		for _, e := range v.([]int64) {
+			result = append(result, c.getStringOrNumber(e))
+		}
+
+		return "{" + strings.Join(result, ",") + "}"
+	case "set<text>":
+		var result []string
+		for _, e := range v.([]string) {
+			result = append(result, c.getStringOrNumber(e))
+		}
+
+		return "{" + strings.Join(result, ",") + "}"
+	case "map<text, text>":
+		var result []string
+		for k, v := range v.(map[string]string) {
+			result = append(result, c.getStringOrNumber(k)+":"+c.getStringOrNumber(v))
+		}
+
+		return "{" + strings.Join(result, ",") + "}"
+	case "map<bigint, text>":
+		var result []string
+		for k, v := range v.(map[int64]string) {
 			result = append(result, c.getStringOrNumber(k)+":"+c.getStringOrNumber(v))
 		}
 
@@ -132,16 +173,31 @@ func (c *Cassandra) getInsertDataQuery(keyspace string, table *gocql.TableMetada
 	params = append(params, keyspace)
 	params = append(params, table.Name)
 
+	removedElementsCount := 0
+	columnsNameCopy := make([]string, len(columnsName))
+	copy(columnsNameCopy, columnsName)
+
 	var values []string
-	for i, columnName := range columnsName {
+	for i, columnName := range columnsNameCopy {
 		v := c.getValueString(results[columnName], table.Columns[columnName])
 		// only append column + value that are not empty
-		if v != "" {
+		if v != "" && v != "<nil>" {
 			values = append(values, v)
 		} else {
 			// remove column from columnsName
-			columnsName = append(columnsName[:i], columnsName[i+1:]...)
+			idx := i - removedElementsCount
+			if len(columnsName) == idx {
+				columnsName = columnsName[:idx]
+			} else {
+				columnsName = append(columnsName[:idx], columnsName[idx+1:]...)
+			}
+
+			removedElementsCount++
 		}
+	}
+
+	if values == nil || len(values) == 0 {
+		return ""
 	}
 
 	params = append(params, strings.Join(columnsName, ","))
@@ -174,35 +230,51 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 	}
 
 	log.Println("Tables has been created")
-	log.Println("Let's sync tables data")
+	log.Println("Let's sync " + strconv.Itoa(len(k.Tables)) + " tables data")
+
+	var wg sync.WaitGroup
+	wg.Add(len(k.Tables))
 
 	// inject data from S1 to S2
-	for _, table := range k.Tables {
-		log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
-		iter := s1.Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Consistency(gocql.Quorum).Iter()
+	signalCount := 0
 
-		count := 1
-		for {
-			var row = make(map[string]interface{})
-			if !iter.MapScan(row) {
-				break
+	for _, t := range k.Tables {
+		signalCount++
+
+		go func(s int, table *gocql.TableMetadata) {
+			defer wg.Done()
+
+			log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
+			session := c.getCassandraSession(toHost)
+			iter := c.getCassandraSession(fromHost).Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Consistency(gocql.Quorum).Iter()
+
+			count := 1
+			for {
+				var row = make(map[string]interface{})
+				if !iter.MapScan(row) {
+					break
+				}
+
+				if count%1000 == 0 {
+					log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
+				}
+				// insert data from current table row to S2.table
+				q := c.getInsertDataQuery(toKeyspace, table, row)
+
+				if q != "" {
+					err := session.Query(q).Consistency(gocql.Quorum).Exec()
+					if err != nil {
+						panic(err)
+					}
+				}
+
+				count++
 			}
 
-			if count%1000 == 0 {
-				log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
-			}
-			// insert data from current table row to S2.table
-			q := c.getInsertDataQuery(toKeyspace, table, row)
-			err := s2.Query(q).Consistency(gocql.Quorum).Exec()
-			if err != nil {
-				panic(err)
-			}
-
-			count++
-		}
-
-		log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
+			log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
+		}(signalCount, t)
 	}
 
+	wg.Wait()
 	log.Println("End of sync")
 }
