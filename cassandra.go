@@ -2,12 +2,14 @@ package main
 
 import (
 	"github.com/gocql/gocql"
+	"github.com/Jeffail/tunny"
 	"strings"
 	"fmt"
 	"strconv"
 	"log"
 	"time"
 	"sync"
+	"runtime"
 )
 
 type Cassandra struct {
@@ -235,6 +237,21 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 	var wg sync.WaitGroup
 	wg.Add(len(k.Tables))
 
+	numCPUs := runtime.NumCPU()
+	pool := tunny.NewFunc(numCPUs, func(payload interface{}) interface{} {
+		var query = payload.(string)
+
+		err := s2.Query(query).Consistency(gocql.Quorum).Exec()
+		if err != nil {
+			panic(err)
+
+		}
+
+		return nil
+	})
+
+	defer pool.Close()
+
 	// inject data from S1 to S2
 	signalCount := 0
 
@@ -245,8 +262,7 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 			defer wg.Done()
 
 			log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
-			session := c.getCassandraSession(toHost)
-			iter := c.getCassandraSession(fromHost).Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Consistency(gocql.Quorum).Iter()
+			iter := s1.Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Consistency(gocql.Quorum).Iter()
 
 			count := 1
 			for {
@@ -255,18 +271,12 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 					break
 				}
 
-				if count%1000 == 0 {
+				if count%100 == 0 {
 					log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
 				}
 				// insert data from current table row to S2.table
 				q := c.getInsertDataQuery(toKeyspace, table, row)
-
-				if q != "" {
-					err := session.Query(q).Consistency(gocql.Quorum).Exec()
-					if err != nil {
-						panic(err)
-					}
-				}
+				pool.Process(q)
 
 				count++
 			}
