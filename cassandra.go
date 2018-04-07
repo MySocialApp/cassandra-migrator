@@ -2,14 +2,12 @@ package main
 
 import (
 	"github.com/gocql/gocql"
-	"github.com/Jeffail/tunny"
 	"strings"
 	"fmt"
 	"strconv"
 	"log"
 	"time"
 	"sync"
-	"runtime"
 )
 
 type Cassandra struct {
@@ -33,6 +31,8 @@ func (c *Cassandra) getCassandraSession(host string) *gocql.Session {
 	clusterConfig := gocql.NewCluster(mHost)
 	clusterConfig.Port = mPort
 	clusterConfig.Timeout = 60 * time.Second
+	clusterConfig.Consistency = gocql.Quorum
+
 	session, err := clusterConfig.CreateSession()
 
 	if err != nil {
@@ -94,6 +94,10 @@ func (c *Cassandra) getStringOrNumber(v interface{}) string {
 	case string:
 		return fmt.Sprintf("'%v'", strings.Replace(v.(string), "'", "''", -1))
 	case time.Time:
+		if v.(time.Time).IsZero() {
+			return ""
+		}
+
 		return "'" + v.(time.Time).Format("2006-01-02 03:04:05") + "'"
 	default:
 		return fmt.Sprintf("%v", v)
@@ -183,7 +187,7 @@ func (c *Cassandra) getInsertDataQuery(keyspace string, table *gocql.TableMetada
 	for i, columnName := range columnsNameCopy {
 		v := c.getValueString(results[columnName], table.Columns[columnName])
 		// only append column + value that are not empty
-		if v != "" && v != "<nil>" {
+		if v != "" && v != "''" && v != "<nil>" {
 			values = append(values, v)
 		} else {
 			// remove column from columnsName
@@ -208,12 +212,51 @@ func (c *Cassandra) getInsertDataQuery(keyspace string, table *gocql.TableMetada
 	return fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)", params...)
 }
 
-func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKeyspace string, toKeyspace string) {
+func (c *Cassandra) createTable(s *gocql.Session, keyspace string, table *gocql.TableMetadata) {
+	q := c.getCreateTableQuery(keyspace, table)
+	log.Println(q)
+	err := s.Query(q).Exec()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace string, toKeyspace string, table *gocql.TableMetadata) {
+	log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
+	iter := s1.Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Iter()
+
+	count := 0
+
+	for {
+		var row = make(map[string]interface{})
+		if !iter.MapScan(row) {
+			break
+		}
+
+		// insert data from current table row to S2.table
+		q := c.getInsertDataQuery(toKeyspace, table, row)
+
+		if q != "" {
+			count++
+			err := s2.Query(q).Exec()
+			if err != nil {
+				panic(err)
+
+			}
+
+			if count%100 == 0 {
+				log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
+			}
+		}
+	}
+}
+
+func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKeyspace string, toKeyspace string, tableToSync string) {
 	s1 := c.getCassandraSession(fromHost)
 	s2 := c.getCassandraSession(toHost)
 	// create remote Keyspace
 	err := s2.Query("CREATE KEYSPACE IF NOT EXISTS " + toKeyspace +
-		" WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', '4tech-fr': 3 };").Consistency(gocql.Quorum).Exec()
+		" WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', '4tech-fr': 3 };").Exec()
 
 	if err != nil {
 		panic(err)
@@ -223,11 +266,11 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 
 	// create remote Tables
 	for _, table := range k.Tables {
-		q := c.getCreateTableQuery(toKeyspace, table)
-		log.Println(q)
-		err = s2.Query(q).Consistency(gocql.Quorum).Exec()
-		if err != nil {
-			panic(err)
+		if tableToSync != "" && table.Name == tableToSync {
+			c.createTable(s2, toKeyspace, table)
+			break
+		} else if tableToSync == "" {
+			c.createTable(s2, toKeyspace, table)
 		}
 	}
 
@@ -237,52 +280,16 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 	var wg sync.WaitGroup
 	wg.Add(len(k.Tables))
 
-	numCPUs := runtime.NumCPU()
-	pool := tunny.NewFunc(numCPUs, func(payload interface{}) interface{} {
-		var query = payload.(string)
-
-		err := s2.Query(query).Consistency(gocql.Quorum).Exec()
-		if err != nil {
-			panic(err)
-
-		}
-
-		return nil
-	})
-
-	defer pool.Close()
-
 	// inject data from S1 to S2
-	signalCount := 0
-
 	for _, t := range k.Tables {
-		signalCount++
-
-		go func(s int, table *gocql.TableMetadata) {
+		go func(table *gocql.TableMetadata) {
 			defer wg.Done()
-
-			log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
-			iter := s1.Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Consistency(gocql.Quorum).Iter()
-
-			count := 1
-			for {
-				var row = make(map[string]interface{})
-				if !iter.MapScan(row) {
-					break
-				}
-
-				if count%100 == 0 {
-					log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
-				}
-				// insert data from current table row to S2.table
-				q := c.getInsertDataQuery(toKeyspace, table, row)
-				pool.Process(q)
-
-				count++
+			if tableToSync != "" && table.Name == tableToSync {
+				c.syncData(s1, s2, fromKeyspace, toKeyspace, table)
+			} else if tableToSync == "" {
+				c.syncData(s1, s2, fromKeyspace, toKeyspace, table)
 			}
-
-			log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
-		}(signalCount, t)
+		}(t)
 	}
 
 	wg.Wait()
