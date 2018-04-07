@@ -187,7 +187,7 @@ func (c *Cassandra) getInsertDataQuery(keyspace string, table *gocql.TableMetada
 	for i, columnName := range columnsNameCopy {
 		v := c.getValueString(results[columnName], table.Columns[columnName])
 		// only append column + value that are not empty
-		if v != "" && v != "''" && v != "<nil>" {
+		if v != "" && v != "''" && v != "0" && v != "<nil>" {
 			values = append(values, v)
 		} else {
 			// remove column from columnsName
@@ -249,20 +249,26 @@ func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace 
 			}
 		}
 	}
+
+	log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
 }
 
 func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKeyspace string, toKeyspace string, tableToSync string) {
+
 	s1 := c.getCassandraSession(fromHost)
 	s2 := c.getCassandraSession(toHost)
 	// create remote Keyspace
-	err := s2.Query("CREATE KEYSPACE IF NOT EXISTS " + toKeyspace +
+	k, err := s1.KeyspaceMetadata(fromKeyspace)
+	if err != nil {
+		panic(err)
+	}
+
+	err = s2.Query("CREATE KEYSPACE IF NOT EXISTS " + toKeyspace +
 		" WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', '4tech-fr': 3 };").Exec()
 
 	if err != nil {
 		panic(err)
 	}
-
-	k, _ := s1.KeyspaceMetadata(fromKeyspace)
 
 	// create remote Tables
 	for _, table := range k.Tables {
