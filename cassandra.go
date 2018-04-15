@@ -110,21 +110,21 @@ func (c *Cassandra) getValueString(v interface{}, columnMetadata *gocql.ColumnMe
 	}
 
 	switch columnMetadata.Validator {
-	case "list<int>":
+	case "list<int>", "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)":
 		var result []string
 		for _, e := range v.([]int) {
 			result = append(result, c.getStringOrNumber(e))
 		}
 
 		return "[" + strings.Join(result, ",") + "]"
-	case "list<bigint>":
+	case "list<bigint>", "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.LongType)":
 		var result []string
 		for _, e := range v.([]int64) {
 			result = append(result, c.getStringOrNumber(e))
 		}
 
 		return "[" + strings.Join(result, ",") + "]"
-	case "list<text>":
+	case "list<text>", "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)":
 
 		var result []string
 		for _, e := range v.([]string) {
@@ -132,35 +132,35 @@ func (c *Cassandra) getValueString(v interface{}, columnMetadata *gocql.ColumnMe
 		}
 
 		return "[" + strings.Join(result, ",") + "]"
-	case "set<int>":
+	case "set<int>", "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type)":
 		var result []string
 		for _, e := range v.([]int) {
 			result = append(result, c.getStringOrNumber(e))
 		}
 
 		return "{" + strings.Join(result, ",") + "}"
-	case "set<bigint>":
+	case "set<bigint>", "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.LongType)":
 		var result []string
 		for _, e := range v.([]int64) {
 			result = append(result, c.getStringOrNumber(e))
 		}
 
 		return "{" + strings.Join(result, ",") + "}"
-	case "set<text>":
+	case "set<text>", "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type)":
 		var result []string
 		for _, e := range v.([]string) {
 			result = append(result, c.getStringOrNumber(e))
 		}
 
 		return "{" + strings.Join(result, ",") + "}"
-	case "map<text, text>":
+	case "map<text, text>", "org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type, org.apache.cassandra.db.marshal.UTF8Type)":
 		var result []string
 		for k, v := range v.(map[string]string) {
 			result = append(result, c.getStringOrNumber(k)+":"+c.getStringOrNumber(v))
 		}
 
 		return "{" + strings.Join(result, ",") + "}"
-	case "map<bigint, text>":
+	case "map<bigint, text>", "org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.LongType, org.apache.cassandra.db.marshal.UTF8Type)":
 		var result []string
 		for k, v := range v.(map[int64]string) {
 			result = append(result, c.getStringOrNumber(k)+":"+c.getStringOrNumber(v))
@@ -221,7 +221,7 @@ func (c *Cassandra) createTable(s *gocql.Session, keyspace string, table *gocql.
 	}
 }
 
-func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace string, toKeyspace string, table *gocql.TableMetadata) {
+func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace string, toKeyspace string, skipCreateTables bool, table *gocql.TableMetadata) {
 	log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
 	iter := s1.Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Iter()
 
@@ -239,9 +239,8 @@ func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace 
 		if q != "" {
 			count++
 			err := s2.Query(q).Exec()
-			if err != nil {
+			if err != nil && !skipCreateTables {
 				panic(err)
-
 			}
 
 			if count%100 == 0 {
@@ -253,7 +252,8 @@ func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace 
 	log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
 }
 
-func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKeyspace string, toKeyspace string, tableToSync string) {
+func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKeyspace string, toKeyspace string,
+	tableToSync string, skipCreateTables bool) {
 
 	s1 := c.getCassandraSession(fromHost)
 	s2 := c.getCassandraSession(toHost)
@@ -271,12 +271,14 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 	}
 
 	// create remote Tables
-	for _, table := range k.Tables {
-		if tableToSync != "" && table.Name == tableToSync {
-			c.createTable(s2, toKeyspace, table)
-			break
-		} else if tableToSync == "" {
-			c.createTable(s2, toKeyspace, table)
+	if !skipCreateTables {
+		for _, table := range k.Tables {
+			if tableToSync != "" && table.Name == tableToSync {
+				c.createTable(s2, toKeyspace, table)
+				break
+			} else if tableToSync == "" {
+				c.createTable(s2, toKeyspace, table)
+			}
 		}
 	}
 
@@ -291,9 +293,9 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 		go func(table *gocql.TableMetadata) {
 			defer wg.Done()
 			if tableToSync != "" && table.Name == tableToSync {
-				c.syncData(s1, s2, fromKeyspace, toKeyspace, table)
+				c.syncData(s1, s2, fromKeyspace, toKeyspace, skipCreateTables, table)
 			} else if tableToSync == "" {
-				c.syncData(s1, s2, fromKeyspace, toKeyspace, table)
+				c.syncData(s1, s2, fromKeyspace, toKeyspace, skipCreateTables, table)
 			}
 		}(t)
 	}
