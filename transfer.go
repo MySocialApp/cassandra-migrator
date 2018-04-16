@@ -11,6 +11,7 @@ var FromKeyspace = ""
 var ToKeyspace = ""
 var Table = ""
 var SkipCreateTables = false
+var SkipRows = 0
 
 var transferCmd = &cobra.Command{
 	Use:   "transfer [COMMANDS]",
@@ -32,7 +33,7 @@ var transferCmd = &cobra.Command{
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		c := Cassandra{}
-		c.TransferCassandraData(FromHost, ToHost, FromKeyspace, ToKeyspace, Table, SkipCreateTables)
+		c.TransferCassandraData(FromHost, ToHost, FromKeyspace, ToKeyspace, Table, SkipCreateTables, SkipRows)
 	},
 }
 
@@ -42,6 +43,7 @@ func init() {
 	transferCmd.Flags().StringVarP(&ToHost, "to-host", "t", ToHost, "cassandra2:9042")
 	transferCmd.Flags().StringVarP(&ToKeyspace, "to-keyspace", "o", ToKeyspace, "new_keyspace_name")
 	transferCmd.Flags().StringVarP(&Table, "table", "a", Table, "table_to_sync")
+	transferCmd.Flags().IntVar(&SkipRows, "skip-rows", SkipRows, "skip rows")
 	transferCmd.Flags().BoolVarP(&SkipCreateTables, "skip-create-tables", "s", SkipCreateTables, "skip create tables")
 
 	rootCmd.AddCommand(transferCmd)

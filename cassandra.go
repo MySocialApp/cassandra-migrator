@@ -221,7 +221,9 @@ func (c *Cassandra) createTable(s *gocql.Session, keyspace string, table *gocql.
 	}
 }
 
-func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace string, toKeyspace string, skipCreateTables bool, table *gocql.TableMetadata) {
+func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace string, toKeyspace string,
+	skipCreateTables bool, skipRows int, table *gocql.TableMetadata) {
+
 	log.Println("Sync table data from " + fromKeyspace + "." + table.Name + " to " + toKeyspace + "." + table.Name)
 	iter := s1.Query("SELECT * FROM " + fromKeyspace + "." + table.Name).Iter()
 
@@ -233,18 +235,26 @@ func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace 
 			break
 		}
 
-		// insert data from current table row to S2.table
-		q := c.getInsertDataQuery(toKeyspace, table, row)
+		if count >= skipRows {
+			// insert data from current table row to S2.table
+			q := c.getInsertDataQuery(toKeyspace, table, row)
 
-		if q != "" {
-			count++
-			err := s2.Query(q).Exec()
-			if err != nil && !skipCreateTables {
-				panic(err)
+			if q != "" {
+				count++
+				err := s2.Query(q).Exec()
+				if err != nil && !skipCreateTables {
+					panic(err)
+				}
+
+				if count%100 == 0 {
+					log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
+				}
 			}
+		} else {
+			count++
 
-			if count%100 == 0 {
-				log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " rows")
+			if count%1000 == 0 {
+				log.Println(toKeyspace + "." + table.Name + ": " + strconv.Itoa(count) + " skipped rows")
 			}
 		}
 	}
@@ -253,7 +263,7 @@ func (c *Cassandra) syncData(s1 *gocql.Session, s2 *gocql.Session, fromKeyspace 
 }
 
 func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKeyspace string, toKeyspace string,
-	tableToSync string, skipCreateTables bool) {
+	tableToSync string, skipCreateTables bool, skipRows int) {
 
 	s1 := c.getCassandraSession(fromHost)
 	s2 := c.getCassandraSession(toHost)
@@ -293,9 +303,9 @@ func (c *Cassandra) TransferCassandraData(fromHost string, toHost string, fromKe
 		go func(table *gocql.TableMetadata) {
 			defer wg.Done()
 			if tableToSync != "" && table.Name == tableToSync {
-				c.syncData(s1, s2, fromKeyspace, toKeyspace, skipCreateTables, table)
+				c.syncData(s1, s2, fromKeyspace, toKeyspace, skipCreateTables, skipRows, table)
 			} else if tableToSync == "" {
-				c.syncData(s1, s2, fromKeyspace, toKeyspace, skipCreateTables, table)
+				c.syncData(s1, s2, fromKeyspace, toKeyspace, skipCreateTables, skipRows, table)
 			}
 		}(t)
 	}
