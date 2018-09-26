@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/spf13/cobra"
 	"fmt"
+	"github.com/spf13/cobra"
 )
 
 var FromHost = ""
@@ -11,6 +11,7 @@ var FromKeyspace = ""
 var ToKeyspace = ""
 var Table = ""
 var SkipCreateTables = false
+var SkipInsertRowErrors = false
 var SkipRows = 0
 
 var transferCmd = &cobra.Command{
@@ -33,7 +34,7 @@ var transferCmd = &cobra.Command{
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		c := Cassandra{}
-		c.TransferCassandraData(FromHost, ToHost, FromKeyspace, ToKeyspace, Table, SkipCreateTables, SkipRows)
+		c.TransferCassandraData(FromHost, ToHost, FromKeyspace, ToKeyspace, Table, SkipCreateTables, SkipRows, SkipInsertRowErrors)
 	},
 }
 
@@ -45,6 +46,7 @@ func init() {
 	transferCmd.Flags().StringVarP(&Table, "table", "a", Table, "table_to_sync")
 	transferCmd.Flags().IntVar(&SkipRows, "skip-rows", SkipRows, "skip rows")
 	transferCmd.Flags().BoolVarP(&SkipCreateTables, "skip-create-tables", "s", SkipCreateTables, "skip create tables")
+	transferCmd.Flags().BoolVarP(&SkipInsertRowErrors, "skip-insert-row-errors", "x", SkipCreateTables, "skip insert row errors")
 
 	rootCmd.AddCommand(transferCmd)
 }
